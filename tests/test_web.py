@@ -58,6 +58,35 @@ def test_status(client, fake):
     assert s["default_seconds"]["sfx"] == 5.0
     assert s["output_dir"] == str(server.OUTPUT_DIR)
     assert s["jobs"] == {"queued": 0, "running": 0}
+    assert set(s["profiles"]) == {"music", "instrument", "sfx", "raw"}
+    assert s["profiles"]["sfx"]["sample_rate"] == 44100
+    assert s["profiles"]["sfx"]["default_steps"] == 8
+    assert s["profiles"]["sfx"]["supports_edit"] is True
+    assert s["active_audio_type"] is None
+
+
+def test_status_exposes_per_type_capabilities(client, fake, monkeypatch):
+    from dataclasses import replace
+
+    music = replace(fake.profile("music"), name="ace-step", model_label="ACE-Step 1.5",
+                    sample_rate=48000, min_seconds=10, max_seconds=600,
+                    max_steps=8, supports_cfg=False, supports_negative_prompt=False)
+    sfx = replace(music, name="moss-soundeffect", model_label="MOSS-SoundEffect-v2",
+                  min_seconds=0.5, max_seconds=30, default_steps=100, max_steps=200,
+                  default_cfg=4, supports_edit=False, supports_cfg=True, supports_negative_prompt=True)
+    monkeypatch.setattr(fake, "profile", lambda kind: sfx if kind == "sfx" else music)
+    monkeypatch.setattr(fake, "active_audio_type", "sfx", raising=False)
+    s = client.get("/api/status").json()
+    assert s["profiles"]["music"]["min_seconds"] == 10
+    assert s["profiles"]["music"]["supports_cfg"] is False
+    assert s["profiles"]["instrument"] == s["profiles"]["music"]
+    assert s["profiles"]["raw"] == s["profiles"]["music"]
+    assert s["profiles"]["sfx"]["default_steps"] == 100
+    assert s["profiles"]["sfx"]["default_cfg"] == 4
+    assert s["profiles"]["sfx"]["supports_edit"] is False
+    assert s["active_audio_type"] == "sfx"
+    # Existing status consumers retain the legacy backend-level values.
+    assert s["sample_rate"] == 44100 and s["max_seconds"] == fake.max_seconds
 
 
 def test_generate_job_matches_the_mcp_tool(client, fake):

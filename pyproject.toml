@@ -1,7 +1,7 @@
 [project]
 name = "audio-studio-mcp"
 version = "1.0.0"
-description = "Local AI BGM and sound-effect generation (Stable Audio 3) as an MCP server"
+description = "Local AI BGM and sound-effect generation (ACE-Step, MOSS, Stable Audio) as an MCP server"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

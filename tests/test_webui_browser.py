@@ -619,3 +619,51 @@ def test_layout_polish(web, browser, shots):
             assert not page.evaluate(ORPHANS_JS), f"{lang} {width} export"
     page.select_option("#lang", "auto")
     assert not errors, errors
+
+
+def test_hybrid_profiles_and_unsupported_edit(web, browser):
+    """Model profiles control limits/defaults, restoration and AI edit availability."""
+    errors = []
+    page = _page(browser, web, "en", "light", errors)
+    page.wait_for_function("state.status !== null")
+    # Keep inference fake; inject the two runtime capability profiles at the UI boundary.
+    page.evaluate("""() => {
+      const common = {...state.status.profiles.music, sample_rate: 48000};
+      const music = {...common, name: 'ace-step', model_label: 'ACE-Step 1.5',
+        min_seconds: 10, max_seconds: 600, max_steps: 8,
+        supports_cfg: false, supports_negative_prompt: false};
+      const sfx = {...common, name: 'moss-soundeffect', model_label: 'MOSS-SoundEffect-v2',
+        min_seconds: 0.5, max_seconds: 30, default_steps: 100, default_cfg: 4,
+        max_steps: 200, supports_edit: false};
+      state.status.profiles = {music, instrument: music, raw: music, sfx}; renderStatus();
+    }""")
+    assert page.get_attribute("#duration_seconds", "min") == "10"
+    assert page.get_attribute("#duration_seconds", "max") == "600"
+    assert page.is_disabled("#cfg") and page.is_hidden("#negative_prompt")
+    assert "ACE-Step" in page.text_content("#type-hint")
+    page.click("#gen-form label:has(input[value=sfx])")
+    assert page.get_attribute("#duration_seconds", "max") == "30"
+    assert page.get_attribute("#steps", "placeholder") == "100"
+    assert page.get_attribute("#steps", "max") == "200"
+    assert page.get_attribute("#cfg", "placeholder") == "4"
+    assert not page.is_disabled("#cfg")
+    args = page.evaluate("readForm()")
+    assert "steps" not in args and "cfg" not in args
+    page.evaluate("fillForm({audio_type: 'sfx', prompt: 'rain', seconds: 30, steps: 100, cfg: 4})")
+    assert page.evaluate("readForm().steps") == 100
+    assert page.evaluate("readForm().cfg") == 4
+    # A processed SFX retains its source type; changing the target type cannot unlock editing.
+    page.evaluate("""() => {
+      Editor.item = {meta: {kind: 'process', source: {kind: 'process', source: {audio_type: 'sfx'}}}};
+      Editor.file = 'sfx.wav'; $('#edit-main').hidden = false; Editor.aiField('audio_type').value = 'music';
+      Editor.updateAiForm(); Editor.updateExportForm(); showPage('edit');
+    }""")
+    assert page.is_disabled("#ai-submit")
+    assert page.get_attribute("#ai-unsupported", "hidden") is None
+    assert not page.is_disabled("#x-submit")
+    assert page.evaluate("Editor.aiSupported()") is False
+    assert page.evaluate("Editor.sourceType()") == "sfx"
+    page.evaluate("Editor.item = {meta: {model: 'MOSS-SoundEffect-v2'}}; Editor.updateAiForm()")
+    assert page.is_disabled("#ai-submit")
+    assert not errors
+    page.context.close()

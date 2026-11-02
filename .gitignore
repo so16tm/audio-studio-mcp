@@ -5,8 +5,10 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-hybrid/
 .pytest_cache/
 .ruff_cache/
+.cache/acestep/
 
 # Upstream runtime and weights (fetched by install.sh)
 vendor/

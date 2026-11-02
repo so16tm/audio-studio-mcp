@@ -1,8 +1,8 @@
 """Backend selection.
 
-AUDIO_STUDIO_BACKEND = auto (default) | sa3-mlx | sa3-torch
-  auto picks sa3-mlx on Apple Silicon macOS and sa3-torch (PyTorch, NVIDIA
-  CUDA) everywhere else.
+AUDIO_STUDIO_BACKEND = auto (default) | ace-moss | sa3-mlx | sa3-torch
+  auto picks ace-moss on Windows, sa3-mlx on Apple Silicon macOS and
+  sa3-torch (PyTorch, NVIDIA CUDA) on Linux.
 """
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import platform
 import subprocess
 import sys
 
-from .base import Backend, GenerationRequest, GenerationResult
+from .base import Backend, BackendProfile, GenerationRequest, GenerationResult
 
-__all__ = ["Backend", "GenerationRequest", "GenerationResult", "create_backend", "resolve_backend_name"]
+__all__ = ["Backend", "BackendProfile", "GenerationRequest", "GenerationResult", "create_backend", "resolve_backend_name"]
 
-BACKENDS = ("sa3-mlx", "sa3-torch")
+BACKENDS = ("ace-moss", "sa3-mlx", "sa3-torch")
 
 
 def _running_under_rosetta() -> bool:
@@ -31,6 +31,8 @@ def _running_under_rosetta() -> bool:
 def resolve_backend_name(name: str | None = None) -> str:
     name = (name or os.environ.get("AUDIO_STUDIO_BACKEND") or "auto").strip().lower()
     if name == "auto":
+        if platform.system() == "Windows":
+            return "ace-moss"
         if platform.system() == "Darwin" and platform.machine() == "arm64":
             return "sa3-mlx"
         if platform.system() == "Darwin" and _running_under_rosetta():
@@ -50,6 +52,9 @@ def resolve_backend_name(name: str | None = None) -> str:
 
 def create_backend(name: str | None = None) -> Backend:
     name = resolve_backend_name(name)
+    if name == "ace-moss":
+        from .ace_moss import AceMossBackend
+        return AceMossBackend()
     if name == "sa3-mlx":
         from .sa3_mlx import SA3MLXBackend
         return SA3MLXBackend()

@@ -20,6 +20,8 @@
 
 </div>
 
+> **Windows / NVIDIA update:** BGM now uses ACE-Step 1.5 and sound effects use MOSS-SoundEffect v2.0. Use `install-hybrid.ps1` (Python 3.12, separate `.venv-hybrid`) and follow the [Japanese setup and Claude / Codex registration guide](README.ja.md#-クイックスタート). MOSS sound effects are mono, limited to 30 seconds, and do not support audio editing. The Stable Audio 3 installation instructions below are legacy; select `sa3-torch` explicitly to keep that Windows backend.
+
 **Audio Studio MCP** gives Claude Code, Claude Desktop, Cursor and any other [MCP](https://modelcontextprotocol.io) client a sound studio that runs on your own Mac or Windows PC. Ask for background music or a sound effect in plain language; the model generates it locally with [Stable Audio 3](https://github.com/Stability-AI/stable-audio-3). Then it can loop it, normalize the loudness and export it for your game engine or video editor. There is no cloud service and no API key, and generating doesn't cost anything.
 
 <p align="center">

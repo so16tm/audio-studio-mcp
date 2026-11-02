@@ -20,7 +20,7 @@
 
 </div>
 
-**Audio Studio MCP** は、Claude Code、Claude Desktop、Cursor など任意の [MCP](https://modelcontextprotocol.io) クライアントに、自分の Mac や Windows PC で動くサウンドスタジオを追加します。BGM や効果音を普通の言葉で頼むと、[Stable Audio 3](https://github.com/Stability-AI/stable-audio-3) がローカルで生成します。さらにループ化やラウドネス調整をして、ゲームエンジンや動画編集ソフト向けに書き出せます。クラウドサービスも API キーも不要で、生成にお金はかかりません。
+**Audio Studio MCP** は、Claude Code、Codex、Claude Desktop など任意の [MCP](https://modelcontextprotocol.io) クライアントに、ローカルで動くサウンドスタジオを追加します。Windows / NVIDIA では **ACE-Step 1.5 で BGM、MOSS-SoundEffect v2.0 で効果音**を生成します。ループ化やラウドネス調整をして、ゲームエンジンや動画編集ソフト向けに書き出せます。Mac 向けなどの既存 Stable Audio 3 バックエンドも残しています。
 
 <p align="center">
   <img src="docs/assets/demo-ja.png" alt="実際の Claude Code セッション：1 回の依頼で lo-fi BGM を 2 候補作り、Godot 用のシームレスループ OGG を書き出す" width="820">
@@ -39,12 +39,12 @@
 </table>
 
 - **再現できる：** すべてのファイルに、プロンプト・シード・設定を記録した `.json` が付きます。
-- **プロンプト作りも任せられる：** サーバーが公式の Stable Audio 3 プロンプト形式をクライアントに伝えるので、「きしむドアの音」のような頼み方でも、モデルが理解できるプロンプトに書き換えられます。
-- **公式と同じ出力：** Mac では、同じシードなら公式の `sa3` CLI とビット単位で同じ結果になります。Windows では公式の Stable Audio 3 PyTorch API をそのまま呼び出します。
+- **プロンプト作りも任せられる：** 用途別のモデルと対応パラメータをサーバーがクライアントに伝えます。
+- **公式ランタイムを利用：** Windows の新構成は ACE-Step と MOSS の固定した公式コード・重みを使います。モデル切り替え時に前のモデルを解放し、GPU 処理は順番に実行します。
 
 ## 🎧 サンプル
 
-すべてこのサーバーで M1 Mac 上で生成したもので、手作業での編集はしていません。**[サンプルページを開く →](https://kanaworksai-hue.github.io/audio-studio-mcp/)**
+以下は既存の Stable Audio 3 / M1 Mac で生成したサンプルです。ACE / MOSS の品質例ではありません。**[サンプルページを開く →](https://kanaworksai-hue.github.io/audio-studio-mcp/)**
 
 | | サンプル | プロンプト |
 |---|---|---|
@@ -61,13 +61,88 @@ MP3 は [`docs/samples/`](docs/samples) に、プロンプトとシードは [`s
 
 ```mermaid
 flowchart LR
-    U["あなた<br/>「カフェの BGM を作って」"] --> C["Claude Code · Desktop<br/>Cursor · 任意の MCP クライアント"]
+    U["あなた<br/>「カフェの BGM を作って」"] --> C["Codex · Claude Code · Desktop<br/>Cursor · 任意の MCP クライアント"]
     C -- "MCP" --> S["audio-studio-mcp<br/>生成 · 編集 · 仕上げ"]
-    S --> M["Stable Audio 3<br/>Apple Silicon 上の MLX<br/>NVIDIA GPU 上の PyTorch"]
+    S --> M["Windows: ACE-Step / MOSS<br/>既存構成: Stable Audio 3"]
     M --> F["WAV / OGG / FLAC + .json<br/>ゲームや動画にそのまま"]
 ```
 
 ## 🚀 クイックスタート
+
+### Windows / NVIDIA：ACE-Step 1.5 + MOSS-SoundEffect v2.0
+
+Python **3.12** 専用環境 `.venv-hybrid` を使います。既存の `.venv` / `.venv-cuda` は変更しません。NVIDIA GPU と CUDA 12.8 対応ドライバー、64 ビット Windows、`git`、`uv`、`ffmpeg` が必要です。MOSS は RTX 5080 Laptop GPU 16 GB で動作確認していますが、VRAM に余裕が少なく、より小さい GPU は未検証です。重みだけで約 **21.3 GB**（ACE 10.1 GB、MOSS 11.23 GB）に加え、Python・PyTorch・ソース用の空き容量が必要です。
+
+```powershell
+winget install Git.Git
+winget install astral-sh.uv
+winget install Gyan.FFmpeg
+# インストールしたコマンドを認識する新しい PowerShell で実行
+git clone https://github.com/so16tm/audio-studio-mcp.git
+cd audio-studio-mcp
+powershell -ExecutionPolicy Bypass -File install-hybrid.ps1
+```
+
+`uv` は必要なら Python 3.12 を取得します。既存 Python を使う場合は `-Python 'C:\path\to\Python312\python.exe'` を指定できます。インストーラーは対話入力・管理者権限変更・MCP 登録を行いません。公式ソースを `vendor/ACE-Step-1.5` と `vendor/MOSS-TTS` に固定コミットで取得し、MOSS の CUDA 12.8 依存と本サーバーを導入して、固定リビジョンの重みを**全量**取得します。追加同意ゲートとトークン入力は不要です。既存の Hugging Face キャッシュは再利用され、転送には `hf-xet` を使います。途中失敗時は原因を解消して再実行してください。既存の vendor に変更がある場合は上書きせず停止します。
+
+ACE の任意 LM 推論・学習・`torch.compile` は使いませんが、公式初期化が必要とする LM を含むバンドル全体を取得します。ACE リポジトリの `uv sync` や本プロジェクトの `--extra cuda` をこの環境に追加しないでください（既存 SA3 用の依存と競合します）。重みだけを再取得する場合：
+
+```powershell
+& '.\.venv-hybrid\Scripts\python.exe' '.\scripts\download_hybrid_weights.py'
+```
+
+**MCP 登録**は実際の絶対パスで行います。既存の `audio-studio` 登録がある場合はその項目だけを更新し、ほかのサーバー設定を残してください。
+
+```powershell
+claude mcp add --scope user audio-studio --env AUDIO_STUDIO_BACKEND=ace-moss --env PYTHONIOENCODING=utf-8 --env AUDIO_STUDIO_OUTPUT_DIR=C:\dev\audio-studio-mcp\outputs -- 'C:\dev\audio-studio-mcp\.venv-hybrid\Scripts\audio-studio-mcp.exe'
+codex mcp add audio-studio --env AUDIO_STUDIO_BACKEND=ace-moss --env PYTHONIOENCODING=utf-8 --env AUDIO_STUDIO_OUTPUT_DIR=C:\dev\audio-studio-mcp\outputs -- 'C:\dev\audio-studio-mcp\.venv-hybrid\Scripts\audio-studio-mcp.exe'
+```
+
+Codex の設定例（既存の同名項目に反映）：
+
+```toml
+[mcp_servers.audio-studio]
+command = 'C:\dev\audio-studio-mcp\.venv-hybrid\Scripts\audio-studio-mcp.exe'
+startup_timeout_sec = 60
+tool_timeout_sec = 1800
+[mcp_servers.audio-studio.env]
+AUDIO_STUDIO_BACKEND = "ace-moss"
+PYTHONIOENCODING = "utf-8"
+AUDIO_STUDIO_OUTPUT_DIR = 'C:\dev\audio-studio-mcp\outputs'
+```
+
+Claude Desktop の `claude_desktop_config.json` でも同じ実行ファイルを使います：
+
+```json
+{
+  "mcpServers": {
+    "audio-studio": {
+      "command": "C:\\dev\\audio-studio-mcp\\.venv-hybrid\\Scripts\\audio-studio-mcp.exe",
+      "env": {
+        "AUDIO_STUDIO_BACKEND": "ace-moss",
+        "PYTHONIOENCODING": "utf-8",
+        "AUDIO_STUDIO_OUTPUT_DIR": "C:\\dev\\audio-studio-mcp\\outputs"
+      }
+    }
+  }
+}
+```
+
+GUI クライアントから `ffmpeg` が見つからない場合は、それぞれの `env` に `AUDIO_STUDIO_FFMPEG` を実行ファイルの絶対パスで追加します。設定後はクライアントの MCP 接続を再起動してください。初回生成時にモデルを読み込みます。
+
+| 用途 | モデル | 生成仕様・制限 |
+|---|---|---|
+| `music` / `instrument` / `raw` | ACE-Step 1.5 | 48 kHz ステレオ、10〜600 秒。既定 8 steps / cfg=1。negative prompt・CFG の調整は非対応 |
+| `sfx` | MOSS-SoundEffect v2.0 | 48 kHz モノラル、0.5〜30 秒。既定 100 steps / cfg=4、最大 200 steps。元音声を使う編集は非対応 |
+
+`edit_audio` の BGM のスタイル変換・部分再生成・延長は ACE が処理します。SFX 編集はエラーになり、別モデルへ自動で切り替えません。既存のループ・ラウドネス・書き出し・JSON 生成情報は引き続き利用できます。
+
+ACE のコード・主モデル・VAE は MIT、付属 Qwen と MOSS のコード・モデルは Apache-2.0 です。モデルやコードの再配布時は、それぞれのライセンス・著作権表示・該当する NOTICE 等を保持してください。固定リビジョンは `install-hybrid.ps1` とバックエンドのモデル定数に記録しています。
+
+<details>
+<summary><b>既存 Stable Audio 3 構成（macOS / 明示指定の legacy Windows）</b></summary>
+
+以下の `install.sh` / `install.ps1` は Stable Audio 3 用です。Windows で使う場合は MCP 設定の `AUDIO_STUDIO_BACKEND` を `sa3-torch` に明示してください。新しい ACE / MOSS 環境とは分けて使います。
 
 ### macOS（Apple Silicon）
 
@@ -158,6 +233,8 @@ macOS ではダウンロードにログインは不要で、`hf auth login` で�
 > - 未ログイン、またはダウンロードが 401/403 で失敗した（ライセンス未同意、または別のアカウントで同意した）場合は作業を止め、インストーラーが表示した手順をユーザーに伝えてください：無料アカウントを作る、各モデルのページでライセンスに同意する、ユーザー自身のターミナルで `hf auth login` を実行する。終わったと言われてから、インストーラーを再実行します。
 > - トークンをチャットに貼るようユーザーに頼まないでください。`-SkipWeights` で回避するのも不可です（後で生成するときに同じエラーで失敗します）。
 
+</details>
+
 あとは普通に頼むだけです：
 
 - 「カフェのシーン用に 85 BPM、60 秒の lo-fi BGM ループを作って。候補は 3 つ。」
@@ -169,20 +246,21 @@ macOS ではダウンロードにログインは不要で、`hf auth login` で�
 | ツール | 内容 |
 |---|---|
 | `generate_audio` | テキストから BGM、楽器ループ／ステム、効果音を生成。1 回で 1〜4 候補、`bpm` と効果音用の構造化フィールドに対応 |
-| `edit_audio` | `variation`（全体のスタイル変換）、`inpaint`（指定区間を再生成）、`continue`（延長）。1〜4 候補 |
+| `edit_audio` | BGM の `variation`（全体のスタイル変換）、`inpaint`（指定区間を再生成）、`continue`（延長）。ACE / MOSS 構成で SFX 編集は非対応 |
 | `process_audio` | トリミング → 無音カット → モノラル化 → リサンプリング／ラウドネス → シームレスループ → フェード → ピーク正規化または上限 → WAV / OGG / FLAC。元ファイルは変更しません |
 | `unload_models` | モデルが使っているメモリをすぐ解放 |
 
 <details>
 <summary><b>パラメータの補足</b></summary>
 
-- **`audio_type`**：`music` / `instrument` / `sfx` / `raw`。モデルの学習時と同じプレフィックス（`TrackType: Music, VocalType: Instrumental,` など）をサーバーが自動で付けます。SFX プレフィックスがないと、効果音が音楽になりがちです。
+- **`audio_type`**：`music` / `instrument` / `sfx` / `raw`。ACE / MOSS 構成では用途でモデルを選び、自然文のプロンプトを渡します。Stable Audio 3 構成だけは専用の `TrackType:` / `VocalType:` プレフィックスを付けます。
 - **`variations`**：1〜4 候補。シードは `seed, seed+1, …` です。`seed` を省略するか `-1` にするとランダムになります。
+- **BGM の編集尺**：ACE のカバー変換・部分再生成では元音声の長さが優先されるため、指定尺に合わせて作業用音声を切り詰めるか無音を追加します。元ファイルは変更しません。延長は、追加した末尾区間の再生成で行います。
 - **`sound_source` / `sound_action` / `sound_material` / `sound_space`**：効果音の音源、鳴り方と変化、素材・音色、空間を記述します。
 - **`peak_ceiling_db`**（既定 −1）：安全上限です。ピークが超えた場合だけ全体を下げ、小さい音を持ち上げることはありません。正規化は `process_audio` で行います。
 - **`process_audio` の正規化**：効果音には `peak` がよく使われます。`loudness` は目標 LUFS に合わせます。目安は配信・動画 −14、ゲーム BGM −16、放送 −23 です。
 
-生成ファイルは 44.1 kHz 24-bit ステレオ WAV で、このフォルダの `outputs/` に保存され、それぞれ隣に `<ファイル名>.json` が付きます。後処理したファイルには、元の生成情報が `source` として残ります。
+生成ファイルは `outputs/` に保存され、それぞれ隣に `<ファイル名>.json` が付きます。ACE は 48 kHz ステレオ、MOSS は 48 kHz モノラル、既存 SA3 は 44.1 kHz ステレオの WAV です。後処理したファイルには、元の生成情報が `source` として残ります。
 </details>
 
 ## 🌐 Web UI
@@ -205,7 +283,7 @@ macOS ではダウンロードにログインは不要で、`hf auth login` で�
 .venv/bin/audio-studio-mcp --web 8765
 ```
 
-ブラウザで http://127.0.0.1:8765/ が開きます。ブラウザを開かずに起動するには `--no-browser`、起動時にモデルを読み込むには `--preload` を付けます。止めるときは Ctrl+C です。Windows では `.venv\Scripts\audio-studio-mcp.exe --web 8765` で起動します。
+ブラウザで http://127.0.0.1:8765/ が開きます。ブラウザを開かずに起動するには `--no-browser`、起動時にモデルを読み込むには `--preload` を付けます。止めるときは Ctrl+C です。Windows の新構成では `$env:AUDIO_STUDIO_BACKEND='ace-moss'` を設定し、`& '.\.venv-hybrid\Scripts\audio-studio-mcp.exe' --web 8765` で起動します。
 
 同じポートの `/mcp` で MCP も提供されるので、ページと MCP クライアントで 1 つのプロセスと読み込み済みのモデルを共有できます。一度登録すれば両方を同時に使えます。ページからのリクエストとエージェントからのリクエストは 1 つのキューで順番に処理されます。
 
@@ -232,7 +310,8 @@ claude mcp add --scope user --transport http audio-studio http://127.0.0.1:8765/
 | `AUDIO_STUDIO_MLX_CACHE_GB` | `1` | macOS：MLX のバッファキャッシュ上限。設定しないと、長い曲の生成後に約 6 GB 余分に残ることがあります |
 | `AUDIO_STUDIO_DEVICE` | CUDA があれば `cuda` | Windows/Linux：PyTorch のデバイス。`cuda`、`cuda:1`、`cpu` など |
 | `AUDIO_STUDIO_SA3_DIR` | `<repo>/vendor/stable-audio-3` | 別の stable-audio-3 チェックアウトを使う |
-| `AUDIO_STUDIO_BACKEND` | `auto` | `auto`、`sa3-mlx`（Apple Silicon）、`sa3-torch`（PyTorch、NVIDIA） |
+| `AUDIO_STUDIO_ACE_DIR` | `<repo>/vendor/ACE-Step-1.5` | ACE-Step 1.5 の公式ソース |
+| `AUDIO_STUDIO_BACKEND` | `auto` | Windows の `auto` は `ace-moss`。明示指定は `ace-moss`、`sa3-mlx`（Apple Silicon）、`sa3-torch`（既存 PyTorch）。他 OS の `auto` は従来どおり |
 | `AUDIO_STUDIO_FFMPEG` | `PATH` 上の `ffmpeg` | ffmpeg のパス |
 
 `claude mcp add ... -e 名前=値` で渡すか、クライアント設定の `env` に書きます。
@@ -248,12 +327,14 @@ claude mcp add --scope user --transport http audio-studio http://127.0.0.1:8765/
 claude mcp add --scope user --transport http audio-studio http://127.0.0.1:8765/mcp
 ```
 
-Windows では `.venv\Scripts\audio-studio-mcp.exe --http 8765 --preload` で起動します。
+Windows の新構成では `$env:AUDIO_STUDIO_BACKEND='ace-moss'` を設定し、`& '.\.venv-hybrid\Scripts\audio-studio-mcp.exe' --http 8765 --preload` で起動します。
 
 `--web 8765` でも同じように動き、同じポートで [Web UI](#-web-ui) も使えます。
 </details>
 
 ## ⚡ パフォーマンス
+
+以下は既存の **Stable Audio 3** 構成の測定値です。ACE / MOSS の速度を示すものではありません。新構成ではモデル切り替えのたびに読み込みが発生し、MOSS は指定尺にかかわらず内部で 30 秒分を生成してから切り出します。
 
 M1 Mac 16 GB、medium モデル：
 
@@ -315,13 +396,15 @@ Rosetta で動く x86_64 版の Python（たとえば `/usr/local` にある Int
 <details>
 <summary><b>歌入りの曲は作れますか？</b></summary>
 
-作れません。Stable Audio 3 が生成するのはインストと効果音だけで、聞き取れる歌詞は歌えません。
+この MCP の ACE 構成は BGM 用のインスト生成に固定しています。ACE-Step 自体の歌唱・歌詞生成機能は公開していません。既存の Stable Audio 3 構成も、聞き取れる歌詞の生成には対応していません。
 </details>
 
 <details>
 <summary><b>生成した音声は商用利用できますか？</b></summary>
 
-このプロジェクトのコードは MIT ライセンスです。モデルの重みには [Stability AI Community License](https://huggingface.co/stabilityai/stable-audio-3-optimized) が適用され、モデルと生成物の利用条件はこのライセンスで決まります。商用利用の前に必ず確認してください。執筆時点では、年間収益 100 万米ドル未満の個人・組織による商用利用が認められています。
+新しい Windows 構成は商用利用を認めるライセンスのモデルを使います。[ACE-Step のコード・主モデル・VAE](https://huggingface.co/ACE-Step/Ace-Step1.5) は MIT、[MOSS のコード・モデル](https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0) と必要な Qwen モデルは Apache-2.0 です。これらのライセンス文には売上額による利用上限はありません。モデルやコードを再配布する際は、各ライセンスの著作権表示・ライセンス文・NOTICE の条件に従ってください。生成物に関する第三者の権利は別途確認が必要です。
+
+このプロジェクトのコードは MIT です。明示的に旧 Stable Audio 3 バックエンドを選ぶ場合は、そのモデルに適用される [Stability AI Community License](https://huggingface.co/stabilityai/stable-audio-3-optimized) を確認してください。
 </details>
 
 <details>
@@ -340,6 +423,7 @@ Rosetta で動く x86_64 版の Python（たとえば `/usr/local` にある Int
 
 - [x] Apple Silicon バックエンド（Stable Audio 3、MLX）
 - [x] NVIDIA GPU 向けの Windows バックエンド（Stable Audio 3、PyTorch）
+- [x] Windows で BGM を ACE-Step 1.5、効果音を MOSS-SoundEffect v2.0 に振り分け、Claude / Codex から利用
 - [x] ローカル Web UI（`--web`）
 - [ ] LoRA 対応（上流のランタイムは対応済み）
 
@@ -356,12 +440,15 @@ Audio Studio で作った音を実際に使ってもらえたなら、[リポジ
 
 ## 🛠️ 開発
 
-```bash
-uv run pytest                              # オフラインテスト（モデル不要）
-.venv/bin/python scripts/smoke_test.py     # 実モデルでのエンドツーエンドテスト（M1 で約 30 秒）
+Windows の ACE / MOSS 環境では、セットアップ済みの Python を直接使います。オフラインテストには `pytest` が必要です（`uv pip install --python .venv-hybrid/Scripts/python.exe pytest`）。
+
+```powershell
+.\.venv-hybrid\Scripts\python.exe -m pytest -q
+# 実モデルでの MCP 試験：生成・編集・仕上げ・モデル切り替え・解放
+.\.venv-hybrid\Scripts\python.exe scripts/smoke_test.py --out outputs/mcp-hybrid-smoke --server .venv-hybrid/Scripts/audio-studio-mcp.exe
 ```
 
-Windows では `.venv\Scripts\python scripts\smoke_test.py`（RTX 3060 で約 45 秒、モデル読み込みを含む）。
+macOS など既存環境のオフラインテストは `.venv/bin/python -m pytest -q` で実行します。`scripts/smoke_test.py` は ACE / MOSS 構成専用です。
 
 ```
 src/audio_studio_mcp/
@@ -369,6 +456,7 @@ src/audio_studio_mcp/
   prompts.py           プロンプトの組み立てと、クライアントに送る説明
   post.py              後処理と書き出し
   backends/base.py     バックエンドのインターフェース
+  backends/ace_moss.py  BGM は ACE-Step、効果音は MOSS（Windows / NVIDIA）
   backends/sa3_mlx.py  Apple Silicon 上の Stable Audio 3（MLX）
   backends/sa3_torch.py  NVIDIA GPU 上の Stable Audio 3（PyTorch）
   web.py               Web UI のサーバー（--web）と JSON API
@@ -380,11 +468,12 @@ src/audio_studio_mcp/
 ## 📄 ライセンスとクレジット
 
 - **このプロジェクト：** [MIT](LICENSE)
-- **Stable Audio 3 ランタイム：** インストール時に `vendor/` へダウンロードされます。© Stability AI、MIT ライセンスです。
-- **モデルの重み：** [Stability AI Community License](https://huggingface.co/stabilityai/stable-audio-3-optimized) が適用されます。重みは Hugging Face からダウンロードされ（macOS：`stable-audio-3-optimized`、Windows：`stable-audio-3-medium` と小型モデル）、本プロジェクトでは配布していません。
+- **ACE-Step 1.5：** [公式コード](https://github.com/ace-step/ACE-Step-1.5)、[主モデル・VAE](https://huggingface.co/ACE-Step/Ace-Step1.5) は MIT。必要な [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) は Apache-2.0 です。同梱 LM は取得しますが、この MCP の生成では読み込みません。
+- **MOSS-SoundEffect v2.0：** [公式コード](https://github.com/OpenMOSS/MOSS-TTS)、[モデル重み](https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0) は Apache-2.0。基盤の [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) も Apache-2.0、音声処理依存の [descript-audiotools](https://github.com/descriptinc/audiotools) は MIT です。
+- **既存 Stable Audio 3 構成：** ランタイムは © Stability AI、MIT。重みは [Stability AI Community License](https://huggingface.co/stabilityai/stable-audio-3-optimized) です（macOS：`stable-audio-3-optimized`、明示指定の Windows：`stable-audio-3-medium` と小型モデル）。各モデルの重みは Hugging Face から取得し、本プロジェクトでは配布していません。
 - **ブランド：** KanaWorks_AI の名称、ロゴ、Kana のキャラクターの権利は東京AI映像合同会社に帰属し、MIT ライセンスの対象**外**です。詳しくは [docs/brand](docs/brand/README.md) を参照してください。
 - **フォント：** Web UI には IBM Plex Sans（© IBM Corp.、SIL Open Font License 1.1）を同梱しています（[`OFL.txt`](src/audio_studio_mcp/static/fonts/OFL.txt)）。Web UI の Kana の画像（[`static/brand`](src/audio_studio_mcp/static/brand/README.md)）には上記「ブランド」の項が適用されます。
-- **使用している技術：** [Stable Audio 3](https://github.com/Stability-AI/stable-audio-3)、[MLX](https://github.com/ml-explore/mlx)、[PyTorch](https://pytorch.org)、[Model Context Protocol](https://modelcontextprotocol.io)
+- **使用している技術：** [ACE-Step](https://github.com/ace-step/ACE-Step-1.5)、[MOSS](https://github.com/OpenMOSS/MOSS-TTS)、[Stable Audio 3](https://github.com/Stability-AI/stable-audio-3)、[MLX](https://github.com/ml-explore/mlx)、[PyTorch](https://pytorch.org)、[Model Context Protocol](https://modelcontextprotocol.io)
 
 本プロジェクトは独立したプロジェクトであり、Stability AI、Apple、NVIDIA、Anthropic とは関係がなく、その承認も受けていません。
 

@@ -28,7 +28,7 @@ const EXAMPLES = {
   ],
   instrument: [
     { key: "guitar", prompt: "Fingerpicked nylon-string acoustic guitar loop, warm and intimate, close-mic recording with soft room tone.", seconds: 12, bpm: 90 },
-    { key: "drums", prompt: "Tight funk drum loop with crisp snare, punchy kick and swung closed hi-hats, dry studio recording.", seconds: 8, bpm: 100 },
+    { key: "drums", prompt: "Tight funk drum loop with crisp snare, punchy kick and swung closed hi-hats, dry studio recording.", seconds: 10, bpm: 100 },
     { key: "pad", prompt: "Lush analog synth pad sustaining a minor chord, slow filter sweep, wide stereo and soft reverb.", seconds: 16 },
   ],
   sfx: [
@@ -42,7 +42,7 @@ const EXAMPLES = {
 // Length presets per type (seconds).
 const DURATIONS = {
   music: [30, 60, 120, 180],
-  instrument: [8, 12, 20, 30],
+  instrument: [10, 12, 20, 30],
   sfx: [1.5, 3, 5, 10],
 };
 
@@ -258,6 +258,9 @@ function renderStatus() {
   $("#queue-info").textContent = (s.jobs.running || s.jobs.queued) ? t("jobs.queueInfo", s.jobs) : "";
   $("#lib-folder").textContent = t("lib.folder", { dir: s.output_dir });
   updateDurationUI();
+  updateProfileFields(form(), currentType());
+  updateModelHint();
+  Editor.updateAiForm();
 }
 async function refreshStatus() {
   try { state.status = await api("/api/status"); state.loaded = state.status.loaded; }
@@ -277,28 +280,50 @@ async function unloadModel() {
 const form = () => $("#gen-form");
 const field = (name) => form().elements.namedItem(name);
 function currentType() { return field("audio_type").value; }
-function defaultSeconds(type) { return state.status ? state.status.default_seconds[type] : null; }
+function profileFor(type) {
+  return state.status?.profiles?.[type] || {
+    min_seconds: 0.5, max_seconds: state.status?.max_seconds ?? 380,
+    default_steps: 8, default_cfg: 1, max_steps: 50,
+    supports_cfg: true, supports_negative_prompt: true, supports_edit: true,
+  };
+}
+function defaultSeconds(type) {
+  const d = state.status?.default_seconds[type], p = profileFor(type);
+  return d == null ? null : Math.max(p.min_seconds, Math.min(p.max_seconds, d));
+}
+function updateProfileFields(f, type) {
+  const p = profileFor(type), steps = f.elements.namedItem("steps"), cfg = f.elements.namedItem("cfg"), neg = f.elements.namedItem("negative_prompt");
+  steps.placeholder = String(p.default_steps); steps.max = String(p.max_steps);
+  cfg.placeholder = String(p.default_cfg); cfg.disabled = !p.supports_cfg;
+  cfg.closest(".field").hidden = !p.supports_cfg;
+  neg.disabled = !p.supports_negative_prompt; neg.closest(".field").hidden = !p.supports_negative_prompt;
+}
 function updateDurationUI() {
   const type = currentType(), d = defaultSeconds(type);
   const input = $("#duration_seconds");
   input.placeholder = d ? String(d) : "";
-  if (state.status) input.max = String(state.status.max_seconds);
-  const max = state.status ? state.status.max_seconds : 380;
-  $("#duration-hint").textContent = t("gen.durationHint", { def: d ?? "—", max });
+  const p = profileFor(type), max = p.max_seconds;
+  input.max = String(max); input.min = String(p.min_seconds);
+  $("#duration-hint").textContent = t("gen.durationHint", { def: d ?? "—", min: p.min_seconds, max });
   const empty = input.value.trim() === "", cur = Number(input.value), auto = empty || cur === d;
-  input.title = t("gen.durationHint", { def: d ?? "—", max });
+  input.title = t("gen.durationHint", { def: d ?? "—", min: p.min_seconds, max });
   replaceKeepFocus($("#durations"),
     el("button", { type: "button", class: "chip", "aria-pressed": String(auto), text: t("gen.durationAuto", { def: d ?? "—" }),
       onclick: () => { input.value = ""; updateDurationUI(); } }),
-    ...DURATIONS[type].filter((s) => s <= max && s !== d).map((s) =>
+    ...DURATIONS[type].filter((s) => s >= p.min_seconds && s <= max && s !== d).map((s) =>
       el("button", { type: "button", class: "chip", "aria-pressed": String(!empty && cur === s), text: `${s} s`,
         onclick: () => { input.value = s; updateDurationUI(); } })));
+}
+function updateModelHint() {
+  const type = currentType(), p = profileFor(type);
+  $("#type-hint").textContent = [t(`type.${type}Hint`), p.model_label].filter(Boolean).join(" · ");
 }
 function updateTypeUI() {
   const type = currentType(), sfx = type === "sfx";
   $("#sfx-fields").hidden = !sfx;
   $("#bpm-field").hidden = sfx;
-  $("#type-hint").textContent = t(`type.${type}Hint`);
+  updateProfileFields(form(), type);
+  updateModelHint();
   $("#prompt-label").textContent = t(`gen.prompt.${type}`);
   $("#prompt-hint").textContent = t(`gen.promptHint.${type}`);
   $("#prompt").placeholder = t(`gen.promptPh.${type}`);
@@ -313,7 +338,8 @@ function applyExample(type, ex) {
   field("audio_type").value = type;
   $("#prompt").value = ex.prompt || "";
   for (const [k, v] of [["sound_source", ex.source], ["sound_action", ex.action], ["sound_material", ex.material], ["sound_space", ex.space]]) field(k).value = v || "";
-  $("#duration_seconds").value = ex.seconds ?? "";
+  const p = profileFor(type);
+  $("#duration_seconds").value = ex.seconds == null ? "" : Math.max(p.min_seconds, Math.min(p.max_seconds, ex.seconds));
   $("#bpm").value = ex.bpm ?? "";
   clearErrors();
   updateTypeUI();
@@ -340,14 +366,14 @@ function readForm() {
     }
   }
   for (const k of NUMBER_FIELDS) {
-    if (k === "bpm" && type === "sfx") continue;
+    if ((k === "bpm" && type === "sfx") || field(k).disabled) continue;
     const raw = field(k).value.trim();
     if (raw !== "") args[k] = Number(raw);
   }
   const title = field("title").value.trim();
   if (title) args.title = title;
   const neg = field("negative_prompt").value.trim();
-  if (neg) args.negative_prompt = neg;
+  if (neg && !field("negative_prompt").disabled) args.negative_prompt = neg;
   return args;
 }
 function fillForm(meta) {
@@ -361,8 +387,8 @@ function fillForm(meta) {
   field("duration_seconds").value = meta.seconds ?? "";
   field("bpm").value = meta.bpm ?? "";
   field("seed").value = meta.seed ?? "";
-  field("cfg").value = meta.cfg != null && meta.cfg !== 1 ? meta.cfg : "";
-  field("steps").value = meta.steps != null && meta.steps !== 8 ? meta.steps : "";
+  field("cfg").value = meta.cfg ?? "";
+  field("steps").value = meta.steps ?? "";
   field("negative_prompt").value = meta.negative_prompt || "";
   if (field("cfg").value || field("steps").value || field("negative_prompt").value) $("#advanced").open = true;
   updateTypeUI();
@@ -418,7 +444,10 @@ async function submitJob(args) {
 }
 function initForm() {
   form().addEventListener("change", (e) => {
-    if (e.target.name === "audio_type") updateTypeUI();
+    if (e.target.name === "audio_type") {
+      for (const k of ["cfg", "steps", "negative_prompt"]) field(k).value = "";
+      updateTypeUI(); updateAdvancedDot();
+    }
     if (e.target.name === "variations") updateSubmitLabel();
   });
   form().addEventListener("input", (e) => {
@@ -426,7 +455,16 @@ function initForm() {
     if (e.target.id === "duration_seconds") updateDurationUI();
     updateAdvancedDot();
   });
-  form().addEventListener("submit", (e) => { e.preventDefault(); submitJob(readForm()); });
+  form().addEventListener("submit", (e) => {
+    e.preventDefault();
+    const invalid = NUMBER_FIELDS.map((k) => field(k)).filter((input) =>
+      !input.disabled && !(input.name === "bpm" && currentType() === "sfx") && !input.checkValidity());
+    if (invalid.length) {
+      showFormError(t("err.invalidFields"), invalid.map((input) => ({ field: input.name, message: input.validationMessage })));
+      return;
+    }
+    submitJob(readForm());
+  });
   form().addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); form().requestSubmit(); }
   });

@@ -17,6 +17,25 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+@dataclass(frozen=True)
+class BackendProfile:
+    """Immutable capabilities and provenance of the model used for one request."""
+    name: str
+    model_label: str
+    sample_rate: int
+    max_seconds: float
+    min_seconds: float = 0.5
+    default_steps: int = 8
+    default_cfg: float = 1.0
+    max_steps: int = 50
+    supports_edit: bool = True
+    uses_sa3_prefix: bool = True
+    supports_cfg: bool = True
+    supports_negative_prompt: bool = True
+    model_revision: str | None = None
+    runtime_revision: str | None = None
+
+
 @dataclass
 class GenerationRequest:
     """Backend-neutral generation parameters.
@@ -33,6 +52,8 @@ class GenerationRequest:
     init_strength: float = 1.0
     inpaint_audio: str | None = None
     inpaint_range: tuple[float, float] | None = None
+    audio_type: str = "music"
+    bpm: int | None = None
 
 
 @dataclass
@@ -73,6 +94,10 @@ class Backend(ABC):
         """Blocking; load the models needed for text-to-audio."""
 
     # ── shared behaviour ─────────────────────────────────────────────────────
+    def profile(self, audio_type: str) -> BackendProfile:
+        return BackendProfile(name=self.name, model_label=self.model_label,
+                              sample_rate=self.sample_rate, max_seconds=self.max_seconds)
+
     async def generate(self, seeds: list[int], req: GenerationRequest) -> GenerationResult:
         def job():
             try:

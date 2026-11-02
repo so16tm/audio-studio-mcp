@@ -25,7 +25,7 @@ import secrets
 import stat
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -453,6 +453,8 @@ async def api_status(_: Request) -> Response:
         "loaded": bool(b.loaded()), "max_seconds": b.max_seconds, "sample_rate": b.sample_rate,
         "output_dir": str(_output_dir()), "default_seconds": DEFAULT_SECONDS,
         "jobs": jobs.counts(),
+        "profiles": {kind: asdict(b.profile(kind)) for kind in ("music", "instrument", "sfx", "raw")},
+        "active_audio_type": getattr(b, "active_audio_type", None),
     })
 
 

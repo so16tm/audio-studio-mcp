@@ -139,7 +139,7 @@ def test_bad_dir_and_model(upstream, tmp_path):
 
 @pytest.mark.parametrize("system,machine,expected", [
     ("Darwin", "arm64", "sa3-mlx"),
-    ("Windows", "AMD64", "sa3-torch"),
+    ("Windows", "AMD64", "ace-moss"),
     ("Linux", "x86_64", "sa3-torch"),
 ])
 def test_auto_backend(monkeypatch, system, machine, expected):

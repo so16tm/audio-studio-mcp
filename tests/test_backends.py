@@ -66,10 +66,10 @@ def test_sysctl_missing(mac, monkeypatch):
         backends.resolve_backend_name()
 
 
-@pytest.mark.parametrize("system", ["Windows", "Linux"])
-def test_other_platforms_are_torch(mac, system):
+@pytest.mark.parametrize("system, expected", [("Windows", "ace-moss"), ("Linux", "sa3-torch")])
+def test_other_platforms_auto_selection(mac, system, expected):
     calls = mac("AMD64", system=system)
-    assert backends.resolve_backend_name() == "sa3-torch"
+    assert backends.resolve_backend_name() == expected
     assert calls == []
 
 
@@ -83,3 +83,14 @@ def test_unknown_backend(mac):
     mac("arm64")
     with pytest.raises(RuntimeError, match="unknown AUDIO_STUDIO_BACKEND"):
         backends.resolve_backend_name("cuda")
+
+
+def test_explicit_ace_moss_without_model_imports(mac):
+    calls = mac("arm64")
+    backend = backends.create_backend("ace-moss")
+    try:
+        assert backend.profile("sfx").name == "moss-soundeffect"
+        assert not backend.loaded()
+        assert calls == []
+    finally:
+        backend.executor.shutdown()

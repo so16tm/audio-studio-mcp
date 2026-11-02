@@ -536,7 +536,22 @@ const Editor = {
     f.addEventListener("submit", (e) => { e.preventDefault(); this.submitAi(); });
     f.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); f.requestSubmit(); } });
   },
-  max() { return state.status ? state.status.max_seconds : 380; },
+  max() { return profileFor(this.aiField("audio_type").value).max_seconds; },
+  sourceType() {
+    for (let m = this.item?.meta; m && typeof m === "object"; m = m.source) {
+      if (TYPES.includes(m.audio_type)) return m.audio_type;
+      if (/moss/i.test(String(m.model || ""))) return "sfx";
+    }
+    return "music";
+  },
+  aiSupported() {
+    if (!profileFor(this.aiField("audio_type").value).supports_edit) return false;
+    for (let m = this.item?.meta; m && typeof m === "object"; m = m.source) {
+      if (/moss/i.test(String(m.model || ""))) return false;
+      if (m.audio_type && !profileFor(m.audio_type).supports_edit) return false;
+    }
+    return true;
+  },
   extendDefault() {
     const s = this.seconds;
     return Math.min(this.max(), Math.ceil(s + Math.min(30, Math.max(5, s))));
@@ -544,7 +559,7 @@ const Editor = {
   prefill() {
     const m = (this.item && this.item.meta) || {};
     const src = m.source || {};
-    const type = TYPES.includes(m.audio_type) ? m.audio_type : TYPES.includes(src.audio_type) ? src.audio_type : "music";
+    const type = this.sourceType();
     this.aiField("audio_type").value = type;
     const prompt = m.prompt || promptLabel({ prompt: "", ...prefixSound(m.sound_fields) }) || src.prompt || "";
     this.aiField("prompt").value = prompt;
@@ -578,6 +593,10 @@ const Editor = {
   updateAiForm() {
     if (!$("#ai-form")) return;
     const mode = this.aiMode(), n = parseInt(this.aiField("variations").value, 10) || 1;
+    const supported = this.aiSupported();
+    updateProfileFields($("#ai-form"), this.aiField("audio_type").value);
+    $("#ai-unsupported").hidden = supported;
+    for (const input of document.querySelectorAll('#mode-cards input[name="mode"]')) input.disabled = !supported;
     $("#strength-field").hidden = mode !== "variation";
     $("#inpaint-note").hidden = mode !== "inpaint";
     $("#extend-field").hidden = mode !== "continue";
@@ -604,7 +623,7 @@ const Editor = {
     const atMax = this.seconds >= this.max() - 0.5;  // nothing left to extend
     if (mode === "continue" && atMax) $("#extend-hint").textContent = t("edit.atMax", { max: this.max() });
     const btn = $("#ai-submit");
-    btn.disabled = !this.file || (mode === "inpaint" && !this.sel) || (mode === "continue" && atMax);
+    btn.disabled = !this.file || !supported || (mode === "inpaint" && !this.sel) || (mode === "continue" && atMax);
     if (mode === "variation") btn.textContent = n > 1 ? t("edit.submitVariationN", { n }) : t("edit.submitVariation");
     else if (mode === "inpaint") btn.textContent = this.sel ? t("edit.submitInpaint", { range: this.selText() }) : t("mode.inpaint");
     else btn.textContent = t("edit.submitContinue", { len: target > 0 ? `${target} s` : "—" });
@@ -622,7 +641,7 @@ const Editor = {
   async submitAi() {
     const f = $("#ai-form"), mode = this.aiMode();
     clearErrors(f, $("#ai-error"));
-    if (mode === "inpaint" && !this.sel) return;
+    if (!this.aiSupported() || (mode === "inpaint" && !this.sel)) return;
     const args = { input_audio: this.file, mode, audio_type: this.aiField("audio_type").value,
       prompt: this.aiField("prompt").value.trim(), variations: parseInt(this.aiField("variations").value, 10) };
     let expect = this.seconds;
@@ -635,11 +654,11 @@ const Editor = {
     }
     for (const k of ["seed", "cfg", "steps"]) {
       const raw = this.aiField(k).value.trim();
-      if (raw !== "") args[k] = Number(raw);
+      if (raw !== "" && !this.aiField(k).disabled) args[k] = Number(raw);
     }
     for (const k of ["title", "negative_prompt"]) {
       const v = this.aiField(k).value.trim();
-      if (v) args[k] = v;
+      if (v && !this.aiField(k).disabled) args[k] = v;
     }
     const btn = $("#ai-submit");
     btn.disabled = true;

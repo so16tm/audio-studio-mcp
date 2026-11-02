@@ -4,11 +4,9 @@ Tools: generate_audio, edit_audio (variation / inpaint / continue),
 process_audio (trim, loop, fades, normalize, 48 kHz WAV/OGG/FLAC export; see
 post.py) and unload_models. Every output gets a .json metadata sidecar.
 
-The model runtime is a pluggable backend (backends/): Stable Audio 3 on Apple
-Silicon via MLX, or on NVIDIA GPUs (Windows / Linux) via PyTorch. Models load lazily on the first call and are
-freed after AUDIO_STUDIO_IDLE_UNLOAD_MIN minutes without a request (each MCP
-client session spawns its own stdio server, so keeping ~5 GB resident per
-process forever is not an option on a 16 GB Mac).
+The Windows hybrid backend uses ACE-Step for music and MOSS for effects,
+loading one model at a time. Explicit legacy backends remain available.
+Models load lazily and are freed after AUDIO_STUDIO_IDLE_UNLOAD_MIN idle minutes.
 
 Run:  audio-studio-mcp              (stdio, what MCP clients launch)
       audio-studio-mcp --http 8765  (one shared streamable-HTTP server on 127.0.0.1)
@@ -35,7 +33,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import AliasChoices, Field
 
 from . import post
-from .backends import Backend, GenerationRequest, create_backend
+from .backends import Backend, BackendProfile, GenerationRequest, create_backend
 from .prompts import DEFAULT_SECONDS, INSTRUCTIONS, prepare_prompt, strip_prefix
 
 REPO_DIR = Path(__file__).resolve().parents[2]
@@ -121,21 +119,24 @@ def _input_path(p: str) -> Path:
     return path
 
 
-def _save_generated(backend: Backend, audio: np.ndarray, path: Path,
+def _save_generated(profile: BackendProfile, audio: np.ndarray, path: Path,
                     ceiling_db: float | None, meta: dict) -> dict:
     """Write a 24-bit WAV at the model rate (+ .json sidecar) after the safety ceiling."""
     raw = post.stats(audio)
     gain = 0.0
     if ceiling_db is not None:
         audio, gain = post.peak_ceiling(audio, ceiling_db)
-    post.write(path, audio, backend.sample_rate, "wav")
+    post.write(path, audio, profile.sample_rate, "wav")
     info = {"path": str(path), "seed": meta["seed"],
             "peak_dbfs": post.stats(audio)["peak_dbfs"],
             "raw_peak_dbfs": raw["peak_dbfs"], "ceiling_gain_db": round(gain, 2)}
-    meta = {**meta, "file": path.name, "sample_rate": backend.sample_rate, "bit_depth": 24,
+    meta = {**meta, "file": path.name, "sample_rate": profile.sample_rate, "bit_depth": 24,
+            "channels": int(audio.shape[0]),
             "created": datetime.now().isoformat(timespec="seconds"),
-            "backend": backend.name, "model": backend.model_label,
+            "backend": profile.name, "model": profile.model_label,
             **{k: v for k, v in info.items() if k != "path"}}
+    if profile.model_revision is not None:
+        meta.update(model_revision=profile.model_revision, runtime_revision=profile.runtime_revision)
     info["metadata"] = str(post.write_sidecar(path, meta))
     return info
 
@@ -153,12 +154,12 @@ def _load_sidecar(path: Path) -> dict | None:
         return None
 
 
-def _summary(backend: Backend, prompt: str, seconds: float, n: int,
+def _summary(profile: BackendProfile, prompt: str, seconds: float, n: int,
              wall: float, included_load: bool) -> dict:
     return {
         "prompt_used": prompt,
         "seconds": round(seconds, 2),
-        "model": backend.model_label,
+        "model": profile.model_label,
         "wall_seconds": round(wall, 2),
         "realtime_factor": round(seconds * n / max(wall, 1e-9), 2),
         "included_model_load": included_load,
@@ -168,6 +169,35 @@ def _summary(backend: Backend, prompt: str, seconds: float, n: int,
 def _seeds(seed: int | None, n: int) -> list[int]:
     base = int(seed) if seed is not None and seed >= 0 else int(np.random.randint(0, 2**31 - 5))
     return [base + i for i in range(n)]
+
+
+def _generation_settings(profile: BackendProfile, seconds: float, cfg: float | None,
+                         steps: int | None, negative_prompt: str | None) -> tuple[float, float, int]:
+    """用途に依存する既定値と制約を、推論へ渡す前に一度解決する。"""
+    seconds = float(min(seconds, profile.max_seconds))
+    if seconds < profile.min_seconds:
+        raise ToolError(f"{profile.model_label} needs duration_seconds >= {profile.min_seconds:g}")
+    cfg = profile.default_cfg if cfg is None else cfg
+    steps = profile.default_steps if steps is None else steps
+    if steps > profile.max_steps:
+        raise ToolError(f"steps must be <= {profile.max_steps} for {profile.model_label}")
+    if not profile.supports_cfg and cfg != profile.default_cfg:
+        raise ToolError(f"cfg must be {profile.default_cfg:g} for {profile.model_label}")
+    if not profile.supports_negative_prompt and negative_prompt and negative_prompt.strip():
+        raise ToolError(f"negative_prompt is not supported by {profile.model_label}")
+    return seconds, cfg, steps
+
+
+def _source_audio_type(meta: dict | None) -> str:
+    """仕上げを重ねた音源でも、元の生成用途をsidecarから引き継ぐ。"""
+    while isinstance(meta, dict):
+        if meta.get("audio_type") in ("music", "instrument", "sfx", "raw"):
+            return meta["audio_type"]
+        if (meta.get("backend") in ("moss", "moss-soundeffect")
+                or "moss-soundeffect" in str(meta.get("model", "")).lower()):
+            return "sfx"
+        meta = meta.get("source")
+    return "music"
 
 
 # ── MCP server ───────────────────────────────────────────────────────────────
@@ -223,7 +253,7 @@ _SECONDS_ALIASES = AliasChoices("duration_seconds", "seconds")
 async def generate_audio(
     prompt: Annotated[str, Field(description="English description (see server instructions). Optional for sfx when the sound_* fields are given.")] = "",
     audio_type: Annotated[AudioType, Field(description="music = BGM / full instrumental track; instrument = solo instrument, stem or loop; sfx = sound effect, ambience or one-shot; raw = no prefix (prompt used verbatim)")] = "music",
-    duration_seconds: Annotated[float | None, Field(ge=0.5, le=380, validation_alias=_SECONDS_ALIASES, description="Length in seconds. Default: music 60, instrument 12, sfx 5, raw 30.")] = None,
+    duration_seconds: Annotated[float | None, Field(ge=0.5, le=600, validation_alias=_SECONDS_ALIASES, description="Length in seconds. ACE: 10–600; MOSS: 0.5–30. Default: music 60, instrument 12, sfx 5, raw 30. Capped to the selected model maximum.")] = None,
     variations: Annotated[int, Field(ge=1, le=4, description="Number of candidates (different seeds) to generate in one call.")] = 1,
     bpm: Annotated[int | None, Field(ge=30, le=300, description="Tempo for music/instrument; appended as 'BPM: N.'")] = None,
     sound_source: Annotated[str, Field(description="SFX: what makes the sound (object, instrument, creature, machine).")] = "",
@@ -231,22 +261,26 @@ async def generate_audio(
     sound_material: Annotated[str, Field(description="SFX: material, texture, timbre.")] = "",
     sound_space: Annotated[str, Field(description="SFX: space and recording (indoor/outdoor, distance, dry/reverberant, mic).")] = "",
     seed: _Seed = None,
-    negative_prompt: Annotated[str | None, Field(description="Qualities to avoid. Only takes effect when cfg != 1.")] = None,
-    cfg: Annotated[float, Field(ge=0, le=15, description="Guidance. 1.0 = official default; 3–7 = stricter prompt adherence (≈2× slower).")] = 1.0,
-    steps: Annotated[int, Field(ge=1, le=50, description="Sampling steps; 8 is the official default.")] = 8,
+    negative_prompt: Annotated[str | None, Field(description="Qualities to avoid. Supported by MOSS when cfg != 1; unsupported by ACE turbo.")] = None,
+    cfg: Annotated[float | None, Field(ge=0, le=15, description="Omit for model default: ACE turbo=1 (fixed), MOSS=4.")] = None,
+    steps: Annotated[int | None, Field(ge=1, le=200, description="Omit for model default: ACE turbo=8 (max 8), MOSS=100 (max 200).")] = None,
     title: _Title = None,
     original_idea: _Idea = "",
     peak_ceiling_db: _Ceiling = -1.0,
 ) -> dict:
-    """Generate BGM, instrument loops/stems or sound effects from text with Stable Audio 3 (runs locally). Returns one WAV path per candidate."""
+    """Generate local instrumental BGM with ACE-Step or sound effects with MOSS. Returns one WAV path per candidate, plus metadata."""
     backend = get_backend()
+    profile = backend.profile(audio_type)
     sfx_fields = (sound_source, sound_action, sound_material, sound_space)
-    text, seconds = prepare_prompt(prompt, audio_type, duration_seconds, bpm, sfx_fields)
-    seconds = float(min(seconds or DEFAULT_SECONDS[audio_type], backend.max_seconds))
+    text, seconds = prepare_prompt(prompt, audio_type, duration_seconds, bpm, sfx_fields,
+                                   add_prefix=profile.uses_sa3_prefix)
+    seconds, cfg, steps = _generation_settings(profile,
+        seconds if seconds is not None else DEFAULT_SECONDS[audio_type], cfg, steps, negative_prompt)
     seeds = _seeds(seed, variations)
     res = await backend.generate(seeds, GenerationRequest(
         prompt=text, negative_prompt=negative_prompt or "", seconds=seconds,
-        steps=steps, cfg=cfg))
+        steps=steps, cfg=cfg, audio_type=audio_type, bpm=bpm))
+    seconds = res.audios[0].shape[-1] / profile.sample_rate
 
     meta = {"kind": "generate", "title": title, "original_idea": original_idea,
             "audio_type": audio_type, "prompt": prompt, "prompt_used": text,
@@ -257,9 +291,9 @@ async def generate_audio(
     candidates = []
     paths = _out_paths(stem, tail=tail, count=variations)
     for i, (sd, audio, path) in enumerate(zip(seeds, res.audios, paths)):
-        candidates.append(_save_generated(backend, audio, path, peak_ceiling_db,
+        candidates.append(_save_generated(profile, audio, path, peak_ceiling_db,
                                           {**meta, "seed": sd, "candidate": i + 1}))
-    return {**_summary(backend, text, seconds, variations, res.wall_seconds,
+    return {**_summary(profile, text, seconds, variations, res.wall_seconds,
                        res.included_model_load), "candidates": candidates}
 
 
@@ -268,33 +302,42 @@ async def edit_audio(
     input_audio: Annotated[str, Field(description="Absolute path to an existing audio file (wav/mp3/flac/ogg).")],
     mode: Annotated[Literal["variation", "inpaint", "continue"], Field(description="variation = audio-to-audio remix/style or timbre transfer of the whole clip; inpaint = regenerate only [start,end] and keep the rest; continue = extend the clip to duration_seconds, regenerating from just before the end of its audible content (see overlap_seconds)")],
     prompt: Annotated[str, Field(description="What the result (or the regenerated region) should sound like. May be empty for continue.")] = "",
-    audio_type: Annotated[AudioType, Field(description="Same prefixes as generate_audio.")] = "music",
+    audio_type: Annotated[AudioType | None, Field(description="Omit to infer the input's type from metadata; unannotated files default to music. MOSS sound effects do not support AI editing.")] = None,
     strength: Annotated[float, Field(ge=0.05, le=1.0, description="variation only: init noise level. ~0.4 keeps melody/rhythm (timbre transfer), ~0.6 style transfer, 0.8+ loose.")] = 0.6,
     start_seconds: Annotated[float | None, Field(ge=0, description="inpaint only: region start.")] = None,
     end_seconds: Annotated[float | None, Field(ge=0, description="inpaint only: region end.")] = None,
-    duration_seconds: Annotated[float | None, Field(ge=0.5, le=380, validation_alias=_SECONDS_ALIASES, description="Output length. variation/inpaint default = input length; continue = required total length (> input length).")] = None,
+    duration_seconds: Annotated[float | None, Field(ge=0.5, le=600, validation_alias=_SECONDS_ALIASES, description="Output length. variation/inpaint default = input length; continue = required total length (> input length).")] = None,
     overlap_seconds: Annotated[float, Field(ge=0, le=10, description="continue only: start regenerating this many seconds before the end of the audible content, so a trailing fade or silence is replaced and the join is smooth.")] = 1.0,
     variations: Annotated[int, Field(ge=1, le=4, description="Number of candidates (different seeds).")] = 1,
     bpm: Annotated[int | None, Field(ge=30, le=300)] = None,
     seed: _Seed = None,
-    negative_prompt: Annotated[str | None, Field(description="Only used when cfg != 1.")] = None,
-    cfg: Annotated[float, Field(ge=0, le=15)] = 1.0,
-    steps: Annotated[int, Field(ge=1, le=50)] = 8,
+    negative_prompt: Annotated[str | None, Field(description="Unsupported by ACE turbo.")] = None,
+    cfg: Annotated[float | None, Field(ge=0, le=15)] = None,
+    steps: Annotated[int | None, Field(ge=1, le=200)] = None,
     title: _Title = None,
     original_idea: _Idea = "",
     peak_ceiling_db: _Ceiling = -1.0,
 ) -> dict:
-    """Edit existing audio with Stable Audio 3: variation (audio-to-audio), inpainting a time range, or continuation/extension. Returns one WAV path per candidate.
-
-    Official tip: surrounding context outweighs the prompt — inpaint a large region first and shrink it, and keep prompts plausible for the context."""
+    """Edit instrumental music with ACE-Step: variation, inpaint, or continue. MOSS sound effects support process_audio finishing, but not AI editing. Explicit legacy backends retain their editing support."""
     src = _input_path(input_audio)
+    source_meta = _load_sidecar(src)
+    source_type = _source_audio_type(source_meta)
+    audio_type = audio_type or source_type
+    backend = get_backend()
+    source_profile = backend.profile(source_type)
+    profile = backend.profile(audio_type)
+    # 出力用途を指定し直しても、元のSFXの非対応制約を回避させない。
+    unsupported = source_profile if not source_profile.supports_edit else profile
+    if not unsupported.supports_edit:
+        raise ToolError(f"{unsupported.model_label} does not support AI editing. Generate a new effect "
+                        "or use process_audio for trimming, fades, loops and export.")
     src_len = _audio_seconds(src)
     text = ""
     if prompt.strip():
-        text, _ = prepare_prompt(prompt, audio_type, None, bpm)
+        text, _ = prepare_prompt(prompt, audio_type, None, bpm, add_prefix=profile.uses_sa3_prefix)
 
     req = GenerationRequest(prompt=text, negative_prompt=negative_prompt or "",
-                            seconds=0.0, steps=steps, cfg=cfg)
+                            seconds=0.0, audio_type=audio_type, bpm=bpm)
     if mode == "variation":
         seconds = duration_seconds or src_len
         req.init_audio, req.init_strength = str(src), strength
@@ -314,30 +357,31 @@ async def edit_audio(
         req.inpaint_audio, req.inpaint_range = str(src), (start, seconds)
         extra = {"region": [round(start, 2), seconds]}
 
-    backend = get_backend()
-    req.seconds = seconds = float(min(seconds, backend.max_seconds))
+    seconds, cfg, steps = _generation_settings(profile, seconds, cfg, steps, negative_prompt)
+    req.seconds, req.cfg, req.steps = seconds, cfg, steps
     if req.inpaint_range is not None:
         start, end = req.inpaint_range
         if start >= seconds:
             raise ToolError(f"nothing to regenerate: the region starts at {start:g}s but the output is "
-                            f"{seconds:g}s long (model max {backend.max_seconds:g}s)")
+                            f"{seconds:g}s long (model max {profile.max_seconds:g}s)")
         req.inpaint_range = (start, min(end, seconds))
         extra = {"region": [round(req.inpaint_range[0], 2), round(req.inpaint_range[1], 2)]}
     seeds = _seeds(seed, variations)
     res = await backend.generate(seeds, req)
+    seconds = res.audios[0].shape[-1] / profile.sample_rate
 
     meta = {"kind": f"edit:{mode}", "title": title, "original_idea": original_idea,
             "audio_type": audio_type, "prompt": prompt, "prompt_used": text,
             "bpm": bpm, "seconds": seconds, "negative_prompt": negative_prompt,
             "cfg": cfg, "steps": steps, "variations": variations,
-            "input_audio": str(src), "source": _load_sidecar(src), **extra}
+            "input_audio": str(src), "source": source_meta, **extra}
     stem, tail = (_slug(title, 80), "") if title else (src.stem, f"_{mode}")
     candidates = []
     paths = _out_paths(stem, tail=tail, count=variations)
     for i, (sd, audio, path) in enumerate(zip(seeds, res.audios, paths)):
-        candidates.append(_save_generated(backend, audio, path, peak_ceiling_db,
+        candidates.append(_save_generated(profile, audio, path, peak_ceiling_db,
                                           {**meta, "seed": sd, "candidate": i + 1}))
-    return {**_summary(backend, text, seconds, variations, res.wall_seconds,
+    return {**_summary(profile, text, seconds, variations, res.wall_seconds,
                        res.included_model_load),
             "mode": mode, **extra, "candidates": candidates}
 
@@ -358,7 +402,7 @@ async def process_audio(
     fade_in_ms: Annotated[float, Field(ge=0, le=10000)] = 0.0,
     fade_out_ms: Annotated[float, Field(ge=0, le=10000)] = 0.0,
     format: Annotated[Literal["wav", "ogg", "flac"], Field(description="wav = 24-bit PCM; ogg = Ogg Vorbis (Unity/Godot); flac = 24-bit lossless.")] = "wav",
-    sample_rate: Annotated[Literal[44100, 48000], Field(description="48000 for video; 44100 keeps the model's native rate (no resampling).")] = 48000,
+    sample_rate: Annotated[Literal[44100, 48000], Field(description="Output sample rate. ACE/MOSS are native 48000 Hz; legacy SA3 is 44100 Hz.")] = 48000,
     ogg_quality: Annotated[float, Field(ge=0.1, le=1.0, description="Vorbis quality 0.1–1.0 (0.6 ≈ 190 kbps stereo).")] = 0.6,
     title: Annotated[str | None, Field(description="Output file name stem. Default: <input>_proc.")] = None,
 ) -> dict:
@@ -418,7 +462,7 @@ async def process_audio(
 
 @_tool
 async def unload_models() -> dict:
-    """Free the ~5–7 GB of memory held by the loaded models now (they reload on the next call)."""
+    """Free the currently loaded model and its GPU memory (it reloads on the next generation)."""
     if _backend is None:
         return {"unloaded": False}
     return {"unloaded": await _backend.unload()}
